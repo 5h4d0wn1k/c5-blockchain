@@ -1,81 +1,101 @@
 # C5 — Blockchain Analyzer
 
-Transaction parsing, address clustering, wallet balance tracking, and pattern detection tool.
+A fully **offline**, edu-only blockchain forensics toolkit: transaction/block
+parsing, address clustering, wallet tracking, pattern detection, and a
+consensus-attack scanner that proves its detections against planted fixtures.
 
 ## Overview
 
-This project implements a blockchain analysis toolkit that:
-- Parses raw blockchain transactions using struct
-- Clusters addresses belonging to the same entity
-- Tracks wallet balances across transactions
-- Detects suspicious patterns (round amounts, peeling chains, dusting)
+Parses binary transactions and block headers with the standard library `struct`
+module, then layers on top:
 
-## Features
+- address clustering (multi-signature input analysis),
+- wallet balance + history tracking,
+- transaction-pattern detection (round amounts, peeling chains, dusting),
+- a `SecurityScanner` that detects **double-spend races**, **timestamp
+  manipulation** (clock rollback and far-future blocks), **weak proof-of-work**
+  (header hash not meeting its `bits` target), and **replay attacks**
+  (identical tx hash accepted twice).
 
-- **Transaction parsing**: Binary transaction parsing with struct
-- **Address clustering**: Identify wallets using multiple addresses
-- **Wallet tracking**: Monitor balances and transaction history
-- **Pattern detection**: Round amounts, peeling chains, mixing patterns
-- **Block parsing**: Block header and merkle root computation
+Offline fixtures (`build_fixtures()`) build a small ledger with every attack
+planted in it; `demo`, `scan` and the unit tests prove the detector finds all
+of them.
 
-## Installation
+## Requirements
 
-```bash
-# No external dependencies required
-# Uses only Python standard library
-```
+Python 3.7+, standard library only (struct, hashlib, argparse, json,
+unittest). No network access, no third-party packages.
 
 ## Usage
 
 ```bash
-# Run the analyzer
-python3 blockchain_analyzer.py
+# Offline demo: analyze the planted-attack ledger, print findings (exit 0)
+python3 blockchain_analyzer.py demo
 
-# Use in code
-from blockchain_analyzer import BlockchainAnalyzer, Transaction
+# Scan the fixture ledger and print findings to a JSON report
+python3 blockchain_analyzer.py scan
+python3 blockchain_analyzer.py scan --json
+python3 blockchain_analyzer.py scan --output reports/scan.json
 
+# In code
+from blockchain_analyzer import BlockchainAnalyzer, build_fixtures
 analyzer = BlockchainAnalyzer()
-tx = analyzer.create_sample_transaction()
-analyzer.add_transaction(tx)
+blocks, txs = build_fixtures()
+for b in blocks:
+    analyzer.add_block(b)
 print(analyzer.analyze())
 ```
 
-## Example Output
+## How the security scanner works
 
-```
-=== Blockchain Analyzer ===
-{
-  "blocks": 0,
-  "transactions": 1,
-  "clusters": {
-    "total_clusters": 0,
-    "total_addresses": 0,
-    "clusters": {}
-  },
-  "wallets": {
-    "total_addresses": 1,
-    "total_balance": 50.0,
-    "transactions_processed": 1,
-    "top_wallets": []
-  },
-  "patterns": {
-    "total_patterns": 0,
-    "round_amount_txs": 0,
-    "quick_successions": 0,
-    "peeling_chains": 0,
-    "unique_addresses": 1,
-    "top_addresses": []
-  }
-}
+- **Double-spend race**: indexes every transaction input by
+  `(prev_hash, prev_idx)`; if two *distinct* transactions spend the same
+  output, both are reported.
+- **Timestamp manipulation**: a block whose timestamp is earlier than its
+  parent (clock rollback, high severity) or more than 2 hours ahead of the
+  ledger median time (future block, medium severity).
+- **Weak proof-of-work**: decodes the Bitcoin compact `bits` field into a
+  256-bit target and compares it against the double-SHA-256 header hash. A
+  header hash greater than its target is an invalid/weak block.
+- **Replay attack**: counts transactions by tx hash; a hash appearing more
+  than once is a replay.
 
-Transaction: <hash>
-```
+The fixture ledger mines 3 blocks against a trivial difficulty (~2^252) so
+they *validate*, and deliberately plants the attacks above (mine-blocking is
+fast on a laptop).
+
+## Live Lab Test Plan
+
+Run in any Python 3 environment (no network, no third-party deps):
+
+1. `python3 -m py_compile blockchain_analyzer.py` — syntax check, exit 0.
+2. `python3 blockchain_analyzer.py demo` — analyzes planted-attack fixtures,
+   prints findings grouped by type, exit 0.
+3. `python3 blockchain_analyzer.py scan --output reports/scan.json` — writes a
+   JSON report with all findings and the summary, exit 0.
+4. `python3 -m unittest discover -s tests` — 26 unit + subprocess tests, all
+   pass, including a clean-ledger control proving no false positives.
+5. `python3 blockchain_analyzer.py demo --json` — machine-readable output.
+
+## Metrics
+
+| Detector                 | Finding type                  | Severity | Proven in fixtures/tests |
+|--------------------------|-------------------------------|----------|--------------------------|
+| Double spend             | `double_spend_race`           | high     | yes (1)                  |
+| Clock rollback           | `timestamp_manipulation`      | high     | yes                       |
+| Future block             | `timestamp_manipulation`      | medium   | yes                       |
+| Weak PoW                 | `weak_proof_of_work`          | high     | yes (1)                  |
+| Replay                   | `replay_attack`               | high     | yes (1)                  |
+| Low difficulty (info)    | `low_difficulty`              | low      | yes (3 mined blocks)     |
+
+Fixture ledger: 4 blocks, 5 transactions, 8 findings. Clean-ledger control
+reports zero attack findings. Tests: 26 passing.
 
 ## Legal Disclaimer
 
 **IMPORTANT: Read before use.**
 
-This project is provided for **educational and authorized security testing purposes only**. 
+This project is provided for **educational and authorized security testing purposes only**.
 
 ### Authorization Requirements
 - You MUST have explicit written permission from the network owner before using this tool

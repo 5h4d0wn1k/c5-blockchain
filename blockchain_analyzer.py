@@ -4,6 +4,9 @@
 import struct
 import hashlib
 import json
+import os
+import argparse
+import sys
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
@@ -428,6 +431,131 @@ class PatternDetector:
         }
 
 
+class SecurityScanner:
+    """Scan a ledger for consensus-level attacks using only stdlib.
+
+    Detects:
+      - double-spend races (same prev output spent by two transactions)
+      - timestamp manipulation (clock rollback / far-future block times)
+      - weak proof-of-work (header hash not meeting the target implied by bits)
+      - replay attacks (identical transaction hash accepted more than once)
+    """
+
+    def __init__(self):
+        self.findings: List[Dict] = []
+
+    @staticmethod
+    def _target_from_bits(bits: int) -> int:
+        """Decode Bitcoin compact `bits` into a 256-bit target integer."""
+        exp = bits >> 24
+        mantissa = bits & 0x00ffffff
+        return mantissa * (1 << (8 * (exp - 3)))
+
+    def _detect_double_spends(self, transactions: List[Transaction]) -> None:
+        spent: Dict[Tuple[str, int], List[str]] = defaultdict(list)
+        for tx in transactions:
+            for inp in tx.inputs:
+                key = (inp['prev_hash'], inp['prev_idx'])
+                if tx.tx_hash not in spent[key]:
+                    spent[key].append(tx.tx_hash)
+        for (prev_hash, prev_idx), tx_hashes in spent.items():
+            if len(tx_hashes) > 1:
+                self.findings.append({
+                    'type': 'double_spend_race',
+                    'output': {'prev_hash': prev_hash, 'prev_idx': prev_idx},
+                    'conflicting_txs': tx_hashes,
+                    'severity': 'high',
+                    'note': 'same output spent by multiple distinct transactions'
+                })
+
+    def _detect_timestamp_manipulation(self, blocks: List[Block],
+                                       reference_time: Optional[int] = None) -> None:
+        if len(blocks) < 1:
+            return
+        for i, block in enumerate(blocks):
+            prev_ts = blocks[i - 1].timestamp if i > 0 else block.timestamp
+            if block.timestamp < prev_ts:
+                self.findings.append({
+                    'type': 'timestamp_manipulation',
+                    'block_hash': block.block_hash,
+                    'severity': 'high',
+                    'note': 'block timestamp predates previous block (clock rollback)'
+                })
+        maxima = max(b.timestamp for b in blocks)
+        if reference_time is not None:
+            reference = reference_time
+        else:
+            ts_list = sorted(b.timestamp for b in blocks)
+            reference = ts_list[len(ts_list) // 2]  # median anchor
+        for block in blocks:
+            delta = block.timestamp - reference
+            if delta > 2 * 3600:
+                self.findings.append({
+                    'type': 'timestamp_manipulation',
+                    'block_hash': block.block_hash,
+                    'timestamp': block.timestamp,
+                    'reference': reference,
+                    'delta_seconds': delta,
+                    'severity': 'medium',
+                    'note': 'block timestamp more than 2h in the future'
+                })
+
+    def _detect_weak_pow(self, blocks: List[Block]) -> None:
+        for block in blocks:
+            target = self._target_from_bits(block.bits)
+            hash_int = int.from_bytes(bytes.fromhex(block.block_hash), 'little')
+            if hash_int == 0 or hash_int > target:
+                self.findings.append({
+                    'type': 'weak_proof_of_work',
+                    'block_hash': block.block_hash,
+                    'bits': block.bits,
+                    'target': target,
+                    'hash_value': hash_int,
+                    'severity': 'high',
+                    'note': 'block header hash does not satisfy the target set by bits'
+                })
+            elif target > (0x00ffff << (8 * 26)):
+                self.findings.append({
+                    'type': 'low_difficulty',
+                    'block_hash': block.block_hash,
+                    'bits': block.bits,
+                    'target': target,
+                    'severity': 'low',
+                    'note': 'difficulty target weaker than the historical Bitcoin minimum'
+                })
+
+    def _detect_replay(self, transactions: List[Transaction]) -> None:
+        seen: Dict[str, List[Transaction]] = defaultdict(list)
+        for tx in transactions:
+            seen[tx.tx_hash].append(tx)
+        for tx_hash, txs in seen.items():
+            if len(txs) > 1:
+                self.findings.append({
+                    'type': 'replay_attack',
+                    'tx_hash': tx_hash,
+                    'occurrences': len(txs),
+                    'severity': 'high',
+                    'note': 'identical transaction hash accepted multiple times'
+                })
+
+    def scan(self, blocks: List[Block] = None, transactions: List[Transaction] = None,
+             reference_time: Optional[int] = None) -> List[Dict]:
+        blocks = blocks or []
+        transactions = transactions or []
+        self.findings = []
+        self._detect_double_spends(transactions)
+        self._detect_timestamp_manipulation(blocks, reference_time)
+        self._detect_weak_pow(blocks)
+        self._detect_replay(transactions)
+        return self.findings
+
+    def summary(self) -> Dict:
+        counts: Dict[str, int] = defaultdict(int)
+        for f in self.findings:
+            counts[f['type']] += 1
+        return {'total_findings': len(self.findings), 'by_type': dict(counts)}
+
+
 class BlockchainAnalyzer:
     """Main blockchain analyzer combining all components."""
 
@@ -435,6 +563,7 @@ class BlockchainAnalyzer:
         self.clusterer = AddressClusterer()
         self.tracker = WalletTracker()
         self.detector = PatternDetector()
+        self.scanner = SecurityScanner()
         self.blocks: List[Block] = []
         self.transactions: List[Transaction] = []
 
@@ -451,13 +580,20 @@ class BlockchainAnalyzer:
         input_addrs = [i.get('address', '') for i in tx.inputs if i.get('address')]
         self.clusterer.add_transaction_inputs(input_addrs)
 
+    def scan(self, reference_time: Optional[int] = None) -> List[Dict]:
+        """Run the consensus security scanner over the analyzed ledger."""
+        return self.scanner.scan(self.blocks, self.transactions, reference_time)
+
     def analyze(self) -> Dict:
+        self.scan()
         return {
             'blocks': len(self.blocks),
             'transactions': len(self.transactions),
             'clusters': self.clusterer.summary(),
             'wallets': self.tracker.summary(),
-            'patterns': self.detector.get_statistics()
+            'patterns': self.detector.get_statistics(),
+            'security': {'findings': self.scanner.findings,
+                         'summary': self.scanner.summary()}
         }
 
     def create_sample_transaction(self) -> Transaction:
@@ -477,11 +613,190 @@ class BlockchainAnalyzer:
         return Transaction(raw)
 
 
-if __name__ == "__main__":
-    print("=== Blockchain Analyzer ===")
+def make_tx(prev_hash: str, prev_idx: int, out_val: int,
+            version: int = 1, lock_time: int = 0) -> Transaction:
+    """Build a minimal raw transaction with one input + one output."""
+    tx = Transaction()
+    raw = struct.pack('<I', version)
+    raw += struct.pack('<B', 1)
+    raw += bytes.fromhex(prev_hash)
+    raw += struct.pack('<I', prev_idx)
+    raw += struct.pack('<B', 25) + bytes(25)      # dummy unlocking script
+    raw += struct.pack('<I', 0xffffffff)
+    raw += struct.pack('<B', 1)
+    raw += struct.pack('<Q', out_val)
+    raw += struct.pack('<B', 25) + bytes(25)      # dummy locking script
+    raw += struct.pack('<I', lock_time)
+    tx.parse(raw)
+    return tx
+
+
+def make_block(prev_hash_hex: str, timestamp: int, bits: int,
+               nonce: int, merkle_root: bytes = bytes(32)) -> Block:
+    """Build a raw 80-byte block header."""
+    raw = struct.pack('<I', 1)
+    raw += bytes.fromhex(prev_hash_hex)
+    raw += merkle_root
+    raw += struct.pack('<I', timestamp)
+    raw += struct.pack('<I', bits)
+    raw += struct.pack('<I', nonce)
+    return Block(raw)
+
+
+def mine_block(prev_hash_hex: str, timestamp: int, bits: int,
+               merkle_root: bytes = bytes(32), max_attempts: int = 1000000) -> Block:
+    """Build a block and search a nonce so its header hash meets `bits`.
+
+    Uses a trivially easy difficulty for the fixture ledger so the search is
+    fast on a laptop.
+    """
+    target = SecurityScanner._target_from_bits(bits)
+    for nonce in range(max_attempts):
+        raw = struct.pack('<I', 1)
+        raw += bytes.fromhex(prev_hash_hex)
+        raw += merkle_root
+        raw += struct.pack('<I', timestamp)
+        raw += struct.pack('<I', bits)
+        raw += struct.pack('<I', nonce)
+        digest = hashlib.sha256(hashlib.sha256(raw).digest()).digest()
+        if int.from_bytes(digest, 'big') <= target:
+            return Block(raw)
+    raise RuntimeError('mine_block: nonce search exhausted; target too hard')
+
+
+def build_fixtures() -> Tuple[List[Block], List[Transaction]]:
+    """Build an offline ledger with deliberately planted attack evidence.
+
+    Returns (blocks, transactions) containing:
+      - a chain of PoW-valid blocks with normal transactions
+      - a double-spend race (two txs spend the same prev output)
+      - a future-dated block and a rolled-back block clock
+      - a weak-PoW block (header hash does not meet its bits target)
+      - a replayed transaction hash accepted twice
+    """
+    # trivially easy difficulty for offline mining: target ~ 2^252
+    # (still above the Bitcoin-minimum threshold so it is flagged low_difficulty)
+    easy_bits = (0x20 << 24) | 0x000fffff
+    utxo_hash = '11' * 32
+
+    tx_genesis = make_tx('22' * 32, 0, 400000000)
+    head = mine_block('33' * 32, 1666000000, easy_bits)
+    head.transactions = [tx_genesis]
+
+    # double-spend race: both spend the same utxo output
+    spend_a = make_tx(utxo_hash, 0, 100000000)
+    spend_b = make_tx(utxo_hash, 0, 90000000)
+
+    # replay: identical raw bytes accepted a second time -> same tx hash
+    replayed = make_tx(utxo_hash, 3, 50000000)
+    dup = make_tx(utxo_hash, 3, 50000000)     # byte-identical -> same hash
+
+    # future-dated block (+12h) chained to head
+    future = mine_block(head.block_hash, 1666000000 + 12 * 3600, easy_bits)
+    future.transactions = [spend_a]
+
+    # rolled-back clock: timestamp earlier than its parent
+    rollback = mine_block(future.block_hash, 1600000000, easy_bits)
+    rollback.transactions = [spend_b]
+
+    # weak PoW: claims the Bitcoin minimum target (2^224) but the header hash
+    # was never mined against it -> the hash exceeds the target (invalid block)
+    weak = make_block(rollback.block_hash, 1666000100, 0x1d00ffff, 123456789)
+    weak.transactions = [replayed, dup]
+
+    blocks = [head, future, rollback, weak]
+    transactions = [tx_genesis, spend_a, spend_b, replayed, dup]
+    return blocks, transactions
+
+
+def run_demo(args) -> int:
+    """Offline demo: analyze planted-attack fixtures, print findings, exit 0."""
+    print("=== C5 - Blockchain Analyzer (Demo Mode) ===")
+    blocks, transactions = build_fixtures()
     analyzer = BlockchainAnalyzer()
-    tx = analyzer.create_sample_transaction()
-    analyzer.add_transaction(tx)
+    for block in blocks:
+        analyzer.add_block(block)
+    for tx in transactions:
+        if tx not in analyzer.transactions:
+            analyzer.add_transaction(tx)
     result = analyzer.analyze()
-    print(json.dumps(result, indent=2))
-    print("\nTransaction:", tx.tx_hash)
+    findings = result['security']['findings']
+
+    print(f"Ledger: {len(blocks)} blocks, {len(analyzer.transactions)} transactions")
+    print(f"Security findings: {len(findings)}")
+    by_type = {}
+    for f in findings:
+        by_type.setdefault(f['type'], []).append(f)
+    for ftype, items in sorted(by_type.items()):
+        print(f"  [{ftype}] x{len(items)}  severities=" +
+              ",".join(i['severity'] for i in items))
+    for f in findings[:3]:
+        print(f"    note: {f['note']}")
+
+    if args.json or args.output:
+        report = {'tool': 'c5-blockchain', 'command': 'demo', 'analysis': result}
+        if args.output:
+            os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+            with open(args.output, 'w') as fh:
+                json.dump(report, fh, indent=2)
+            print(f"Report written to {args.output}")
+        else:
+            print(json.dumps(report, indent=2))
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description='C5 - Blockchain Analyzer',
+        epilog='Educational blockchain forensics: transaction parsing, clustering, '
+               'wallet tracking, pattern detection, and consensus-attack scanning.')
+    sub = parser.add_subparsers(dest='command')
+
+    common_out = argparse.ArgumentParser(add_help=False)
+    common_out.add_argument('--json', action='store_true', help='Print machine-readable JSON')
+    common_out.add_argument('--output', '-o', help='Write JSON report to file')
+
+    p_demo = sub.add_parser('demo', parents=[common_out], help='Offline demo')
+    p_scan = sub.add_parser('scan', parents=[common_out],
+                            help='Scan a ledger for double-spends, weak PoW, '
+                                 'timestamp manipulation and replays')
+    p_scan.add_argument('--fixtures', action='store_true', default=True,
+                        help='Use the built-in planted-attack fixtures (default)')
+    p_scan.add_argument('--reference-time', type=int, default=None,
+                        help='Anchor timestamp (unix) for future-block detection')
+
+    args = parser.parse_args(argv)
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    if args.command == 'demo':
+        return run_demo(args)
+
+    if args.command == 'scan':
+        blocks, transactions = build_fixtures()
+        scanner = SecurityScanner()
+        findings = scanner.scan(blocks, transactions, args.reference_time)
+        if args.json or args.output:
+            report = {'tool': 'c5-blockchain', 'command': 'scan', 'findings': findings,
+                      'summary': scanner.summary()}
+            if args.output:
+                os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+                with open(args.output, 'w') as fh:
+                    json.dump(report, fh, indent=2)
+                print(f"Report written to {args.output}")
+            else:
+                print(json.dumps(report, indent=2))
+        else:
+            print(f"Security findings: {len(findings)}")
+            for f in findings:
+                print(f"  [{f['severity']:6s}] {f['type']}: {f['note']}")
+        return 0
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
