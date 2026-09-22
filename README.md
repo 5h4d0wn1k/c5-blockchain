@@ -4,137 +4,89 @@
 > prohibited and may be illegal. Read [ETHICS.md](ETHICS.md) and
 > [SCOPE.md](SCOPE.md) before use. Use at your own risk; **AS IS**, no warranty.
 
-# C5 — Blockchain Analyzer
+# C5 Blockchain Analyzer — Offline Blockchain Forensics & Consensus Attack Detection
 
-A fully **offline**, edu-only blockchain forensics toolkit: transaction/block
-parsing, address clustering, wallet tracking, pattern detection, and a
-consensus-attack scanner that proves its detections against planted fixtures.
+[![License](https://img.shields.io/github/license/5h4d0wn1k/c5-blockchain)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/5h4d0wn1k/c5-blockchain)](https://github.com/5h4d0wn1k/c5-blockchain/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/5h4d0wn1k/c5-blockchain)](https://github.com/5h4d0wn1k/c5-blockchain/commits/master)
+[![Issues](https://img.shields.io/github/issues/5h4d0wn1k/c5-blockchain)](https://github.com/5h4d0wn1k/c5-blockchain/issues)
 
-## Overview
+**C5 Blockchain Analyzer** is an offline, Python-based blockchain forensics toolkit for transaction parsing, address clustering, wallet tracking, pattern detection, and consensus attack scanning. Built for authorized security research, digital forensics education, and blockchain integrity analysis.
 
-Parses binary transactions and block headers with the standard library `struct`
-module, then layers on top:
+## Why C5 Blockchain Analyzer?
 
-- address clustering (multi-signature input analysis),
-- wallet balance + history tracking,
-- transaction-pattern detection (round amounts, peeling chains, dusting),
-- a `SecurityScanner` that detects **double-spend races**, **timestamp
-  manipulation** (clock rollback and far-future blocks), **weak proof-of-work**
-  (header hash not meeting its `bits` target), and **replay attacks**
-  (identical tx hash accepted twice).
+C5 Blockchain Analyzer enables security researchers and students to analyze blockchain data structures offline without connecting to live networks. The toolkit parses binary transactions and block headers using Python's standard library, performs address clustering from multi-signature inputs, tracks wallet balances and transaction histories, detects suspicious transaction patterns, and includes a SecurityScanner that identifies consensus-level anomalies against planted fixtures. All analysis runs fully offline for safe, controlled educational environments.
 
-Offline fixtures (`build_fixtures()`) build a small ledger with every attack
-planted in it; `demo`, `scan` and the unit tests prove the detector finds all
-of them.
+## Features
 
-## Requirements
+- **Binary Transaction Parsing** — Parse raw transaction and block header data using standard library `struct` module (see `Transaction` and `Block` classes in `blockchain_analyzer.py`).
+- **Address Clustering** — Identify related addresses through multi-signature input analysis with `AddressClusterer`.
+- **Wallet Tracking** — Track balances, transaction histories, and wallet-level activity with `WalletTracker`.
+- **Transaction Pattern Detection** — Detect suspicious patterns like round amounts, peeling chains, and dusting transactions via `PatternDetector`.
+- **Consensus Attack Detection** — `SecurityScanner` detects double-spend races, timestamp manipulation (clock rollback and far-future blocks), weak proof-of-work (hash below target), and replay attacks.
+- **Planted-Attack Fixtures** — `build_fixtures()` creates a controlled ledger with planted attacks for reproducible validation and demos.
+- **Offline-First Analysis** — Fully self-contained with no external network dependencies for safe educational use.
 
-Python 3.7+, standard library only (struct, hashlib, argparse, json,
-unittest). No network access, no third-party packages.
+## Quickstart
 
-## Usage
+### Prerequisites
+
+- Python 3.7+
+
+### Setup
 
 ```bash
-# Offline demo: analyze the planted-attack ledger, print findings (exit 0)
-python3 blockchain_analyzer.py demo
-
-# Scan the fixture ledger and print findings to a JSON report
-python3 blockchain_analyzer.py scan
-python3 blockchain_analyzer.py scan --json
-python3 blockchain_analyzer.py scan --output reports/scan.json
-
-# In code
-from blockchain_analyzer import BlockchainAnalyzer, build_fixtures
-analyzer = BlockchainAnalyzer()
-blocks, txs = build_fixtures()
-for b in blocks:
-    analyzer.add_block(b)
-print(analyzer.analyze())
+git clone https://github.com/5h4d0wn1k/c5-blockchain
+cd c5-blockchain
 ```
 
-## How the security scanner works
+### Usage
 
-- **Double-spend race**: indexes every transaction input by
-  `(prev_hash, prev_idx)`; if two *distinct* transactions spend the same
-  output, both are reported.
-- **Timestamp manipulation**: a block whose timestamp is earlier than its
-  parent (clock rollback, high severity) or more than 2 hours ahead of the
-  ledger median time (future block, medium severity).
-- **Weak proof-of-work**: decodes the Bitcoin compact `bits` field into a
-  256-bit target and compares it against the double-SHA-256 header hash. A
-  header hash greater than its target is an invalid/weak block.
-- **Replay attack**: counts transactions by tx hash; a hash appearing more
-  than once is a replay.
+Run the offline demo with planted fixtures:
 
-The fixture ledger mines 3 blocks against a trivial difficulty (~2^252) so
-they *validate*, and deliberately plants the attacks above (mine-blocking is
-fast on a laptop).
+```bash
+python blockchain_analyzer.py demo
+```
 
-## Live Lab Test Plan
+Scan for consensus attacks using built-in fixtures:
 
-Run in any Python 3 environment (no network, no third-party deps):
+```bash
+python blockchain_analyzer.py scan
+```
 
-1. `python3 -m py_compile blockchain_analyzer.py` — syntax check, exit 0.
-2. `python3 blockchain_analyzer.py demo` — analyzes planted-attack fixtures,
-   prints findings grouped by type, exit 0.
-3. `python3 blockchain_analyzer.py scan --output reports/scan.json` — writes a
-   JSON report with all findings and the summary, exit 0.
-4. `python3 -m unittest discover -s tests` — 26 unit + subprocess tests, all
-   pass, including a clean-ledger control proving no false positives.
-5. `python3 blockchain_analyzer.py demo --json` — machine-readable output.
+Scan with custom reference timestamp for future-block detection:
 
-## Metrics
+```bash
+python blockchain_analyzer.py scan --reference-time 1700000000
+```
 
-| Detector                 | Finding type                  | Severity | Proven in fixtures/tests |
-|--------------------------|-------------------------------|----------|--------------------------|
-| Double spend             | `double_spend_race`           | high     | yes (1)                  |
-| Clock rollback           | `timestamp_manipulation`      | high     | yes                       |
-| Future block             | `timestamp_manipulation`      | medium   | yes                       |
-| Weak PoW                 | `weak_proof_of_work`          | high     | yes (1)                  |
-| Replay                   | `replay_attack`               | high     | yes (1)                  |
-| Low difficulty (info)    | `low_difficulty`              | low      | yes (3 mined blocks)     |
+Output machine-readable JSON:
 
-Fixture ledger: 4 blocks, 5 transactions, 8 findings. Clean-ledger control
-reports zero attack findings. Tests: 26 passing.
+```bash
+python blockchain_analyzer.py demo --json
+python blockchain_analyzer.py demo --output report.json
+```
 
-## Legal Disclaimer
+## Project Structure
 
-**IMPORTANT: Read before use.**
+- `blockchain_analyzer.py` — Core implementation of Transaction, Block, clustering, wallet tracking, pattern detection, SecurityScanner, and CLI.
+- `ETHICS.md`, `SCOPE.md` — Educational use guidelines and authorized scope.
+- `SECURITY.md` — Security reporting information.
 
-This project is provided for **educational and authorized security testing purposes only**.
+## Documentation
 
-### Authorization Requirements
-- You MUST have explicit written permission from the network owner before using this tool
-- Unauthorized interception of network communications is illegal under federal and state laws
-- This tool should ONLY be used on networks you own or have written authorization to test
+- [ETHICS.md](ETHICS.md) — Educational purpose and authorized use only.
+- [SCOPE.md](SCOPE.md) — Scope of authorized testing and research.
+- [SECURITY.md](SECURITY.md) — Security policy and reporting.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Code of conduct.
 
-### Legal Framework
-- **Computer Fraud and Abuse Act (CFAA)**: Unauthorized access to computer systems is a federal crime
-- **Wiretap Act (18 U.S.C. § 2511)**: Interception of electronic communications without consent is illegal
-- **State Laws**: Many states have additional computer crime and wiretapping statutes
-- **GDPR/CCPA**: Data collection may be subject to privacy regulations
+## Contributing
 
-### Acceptable Use
-- Testing security of your own networks
-- Authorized penetration testing with written scope
-- Academic research in controlled lab environments
-- Security education and training
-
-### Prohibited Use
-- Intercepting communications on networks you do not own
-- Attacking infrastructure without authorization
-- Any activity that violates applicable laws or regulations
-- Commercial use without proper licensing
-
-### No Warranty
-This software is provided "AS IS" without warranty of any kind. The author is not responsible for any misuse or damage caused by this software.
-
-### Responsible Disclosure
-If you discover vulnerabilities using this tool, follow responsible disclosure practices:
-1. Report to the vendor/owner privately
-2. Allow reasonable time for remediation
-3. Do not exploit beyond proof of concept
+Contributions are welcome for educational and authorized research purposes. Please review [CONTRIBUTING.md](CONTRIBUTING.md) and adhere to [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
-MIT
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+
+> **⚠️ EDUCATIONAL USE ONLY — AUTHORIZED TESTING ONLY.**
